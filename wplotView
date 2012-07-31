@@ -1,0 +1,895 @@
+#!/usr/bin/env python
+from vtk import *
+import math as m
+import numpy as np
+from copy import deepcopy as dc
+import sys
+from time import strftime as now
+import re
+import colorsys
+import argparse
+import itertools as it
+
+##FUNCTIONS
+
+# TODO: Real number for cellUpper, CellLower
+# TODO: Print out list of atom coordinates and make option for setting of focal point
+
+# Class that holds the coordinates of the nuclei and the atomic number
+class Coords:
+    def __init__(self,X,Y,Z,indx):
+        self.xyz = [X,Y,Z]
+        self.index = indx
+
+# Read the *.struct file
+def readStruct(filename):
+    coords = []
+    # TODO: adapt function to work with all kinds of crystal structures
+    struct = open(filename, 'r')
+    massNum = {}
+    names = {}
+    isSymSection = False
+    tmpLst = []
+    tmpVc = []
+    count = 0
+    latparamsline = 4
+    symmops = []
+    # Go through the *.struct file and try to match various regexps for
+    # relevant information
+    for line in struct:
+        count += 1
+        matxyz = re.search("[ -](\d):\s+X=(\d\.\d+)\s+Y=(\d\.\d+)\s+Z=(\d\.\d+)\s+",line)
+        if matxyz:
+            index = matxyz.group(1)
+            XYZ = tuple([float(x) for x in matxyz.group(2,3,4)])
+            coords.append(Coords(XYZ[0],XYZ[1],XYZ[2],matxyz.group(1)))
+        if re.search("\s+Z:\s+",line):
+            massNum[index] = float(re.split("Z:\s+",line)[-1])
+            names[index] = line.split()[0]
+        if 'NUMBER OF SYMMETRY OPERATIONS' in line:
+            symmnum = line.split()[0]
+            isSymSection = True
+        if isSymSection:
+            if len(tmpLst) == 3:
+                symmops.append([np.array(tmpLst),tmpVc])
+                tmpLst = []
+                tmpVc = []
+                # Create numpy array and append to lst of symmops
+            thisLine = re.search('([ -][0-9])([ -][0-9])([ -][0-9])([ -][0-9]\.[0-9]+)',line)
+            if thisLine:
+                tmpLst.append([int(x) for x in thisLine.group(1,2,3)])
+                tmpVc.append(float(thisLine.group(4)))
+        if count == latparamsline:
+            latparams = [float(x) for x in line.split()]
+    struct.close()
+    return coords, massNum, symmops, latparams, names
+
+def isWithinLimits(cellAmount,negCellAmount,coord):
+    if coord[0] >= negCellAmount[0] and coord[0] <= cellAmount[0] \
+    and coord[1] >= negCellAmount[1] and coord[1] <= cellAmount[1] \
+    and coord[2] >= negCellAmount[2] and coord[2] <= cellAmount[2]:
+        return True
+    else:
+        return False
+
+def elementOf(newVec,oldVecSet):
+    exists = False
+    for a in oldVecSet:
+        if tuple(newVec) == tuple(oldVecSet):
+            exists == True
+    return exists
+
+def createUnitCellCoords(coords,symmops,latparams, doSym = True, doTrans = True,
+                         cellAmount = [2,2,2], negCellAmount = [-1,-1,-1] ):
+    newCoords = []
+    lp = latparams
+    if doSym == True:
+        for l in it.product(s,i):
+            vec = np.array(l[1].xyz)
+            # translate the coord and apply symmetry operation, translate back
+            translatedVec = vec - np.array(l[0][1])
+            newCoord = np.dot(l[0][0],translatedVec)
+            vec2 = dc(newCoord + l[0][1])
+            if not elementOf(newCoord,coords) and not elementOf(newCoord,newCoords)  \
+            and isWithinLimits(cellAmount,negCellAmount,newCoord): \
+                newCoords.append(Coords(newCoord[0],newCoord[1],newCoord[2],i.index))
+    if doTrans == True:
+        lowerIndex = negCellAmount
+        upperIndex = [x + 1 for x in cellAmount]
+        for i in coords:
+            for l in it.product(*[k for k in it.imap(range,lowerIndex,upperIndex)]):
+                vec = np.array([x for x in it.imap(float,l)])
+                newCoord = np.array(i.xyz) + vec
+                if not elementOf(newCoord,coords) and not elementOf(newCoord,newCoords)  \
+                and isWithinLimits(cellAmount,negCellAmount,newCoord): \
+                    newCoords.append(Coords(newCoord[0],newCoord[1],newCoord[2],i.index))
+    return newCoords
+
+def uniquify(seq):
+    seen = set()
+    seen_add = seen.add
+    return [ x for x in seq if x not in seen and not seen_add(x)]
+
+def createLineCoords(coordPairs,cellAmount,negCellAmount):
+    newCoordPairs = []
+    for i in coordPairs:
+        for l in range(negCellAmount[0],cellAmount[0] + 1):
+            for k in range(negCellAmount[1],cellAmount[1] + 1):
+                 for m in range(negCellAmount[2],cellAmount[2] + 1):
+                     vec = np.array([float(l),float(k),float(m)])
+                     newCoordPair = [i[0] + vec, i[1] + vec]
+                     if isWithinLimits(cellAmount,negCellAmount,newCoordPair[0]) and isWithinLimits(cellAmount,negCellAmount,newCoordPair[1]):
+                         newCoordPairs.append(newCoordPair)
+    return newCoordPairs
+
+def removeUnwantedCoords(coords, cellAmount, negCellAmount):
+    newCoords=[]
+    lowerIndex = negCellAmount
+    upperIndex = [cellAmount[0] +1, cellAmount[1] + 1, cellAmount[2] +1]
+    for i in coords:
+        if isWithinLimits(cellAmount,negCellAmount,i.xyz):
+            newCoords.append(Coords(i.xyz[0],i.xyz[1],i.xyz[2],i.index))
+    newCoords = uniquify(newCoords)
+    return newCoords
+
+## OH THE REDUNDANCY
+def removeUnwantedCoordPairs(coordPairs, cellAmount, negCellAmount):
+    newCoordPairs = []
+    for i in coordPairs:
+        if isWithinLimits(cellAmount,negCellAmount,i[0]) and isWithinLimits(cellAmount,negCellAmount,i[1]):
+            newCoordPairs.append(i)
+    #newCoordPairs = uniquify(newCoordPairs) -- Doesnt work yet
+    return newCoordPairs
+
+def readWplotout(filename):
+    wplotout = open(filename, 'r')
+    
+    foundConvCellSection = False
+    foundPrimCellSection = False
+    foundRealSpaceSection = False
+    foundPlottingArea = False
+    
+    aConv = []
+    
+    
+    for line in wplotout:
+    	lcFind = re.search('LATTIC CONSTANTS:\s+(\d+\.\d+)\s+(\d+\.\d+)\s+(\d+\.\d+).+',line)
+    	if lcFind:
+    		latparams = [float(x) for x in lcFind.groups()]
+    
+    	anglesFind = re.search('UNIT CELL ANGLES:\s+(\d+\.\d+)\s+(\d+\.\d+)\s+(\d+\.\d+).+',line)
+    	if anglesFind:
+    		angles = [float(x) for x in anglesFind.groups()]
+    
+    	if 'REAL SPACE LATTICE VECTORS' in line:
+    		foundRealSpaceSection = True
+    	if 'CONVENTIONAL UNIT CELL' in line:
+    		foundConvCellSection = True
+    	if 'PRIMITIVE UNIT CELL' in line:
+    		foundPrimCellSection = True
+    		foundConvCellSection = False
+    	if 'PLOTTING AREA' in line:
+    		foundPlottingArea = True
+    	
+    	if foundRealSpaceSection:
+    		if foundConvCellSection:
+    			a1ConvFind = re.search('a1\s+=\s+(\d+\.\d+)\s+(\d+\.\d+)\s+(\d+\.\d+)',line)
+    			if a1ConvFind:
+    				aConv.append([float(x) for x in a1ConvFind.groups()])
+    			a2ConvFind = re.search('a2\s+=\s+(\d+\.\d+)\s+(\d+\.\d+)\s+(\d+\.\d+)',line)
+    			if a2ConvFind:
+    				aConv.append([float(x) for x in a2ConvFind.groups()])
+    			a3ConvFind = re.search('a3\s+=\s+(\d+\.\d+)\s+(\d+\.\d+)\s+(\d+\.\d+)',line)
+    			if a3ConvFind:
+    				aConv.append([float(x) for x in a3ConvFind.groups()])
+    		if foundPrimCellSection:
+    			a3Prim = []
+    			a1PrimFind = re.search('a1.+(\d+\.\d+)\s+(\d+\.\d+)\s+(\d+\.\d+)',line)
+    			if a1PrimFind:
+    				a3Prim.append([float(x) for x in a1PrimFind.groups()])
+    			a2PrimFind = re.search('a2.+(\d+\.\d+)\s+(\d+\.\d+)\s+(\d+\.\d+)',line)
+    			if a2PrimFind:
+    				a3Prim.append([float(x) for x in a2PrimFind.groups()])
+    			a3PrimFind = re.search('a3.+(\d+\.\d+)\s+(\d+\.\d+)\s+(\d+\.\d+)',line)
+    			if a3PrimFind:
+    				a3Prim.append([float(x) for x in a3PrimFind.groups()])
+    	if foundPlottingArea:
+    			originFind = re.search('origin\s+(.\d+\.\d+)\s+(.\d+\.\d+)\s+(.\d+\.\d+)\s+(.\d+\.\d+)\s+(.\d+\.\d+)\s+(.\d+\.\d+)',line)
+    			if originFind:
+    				origin = [float(x) for x in originFind.groups()]
+    			xaxisFind = re.search('x-axis\s+(.\d+\.\d+)\s+(.\d+\.\d+)\s+(.\d+\.\d+)\s+(.\d+\.\d+)\s+(.\d+\.\d+)\s+(.\d+\.\d+)',line)
+    			if xaxisFind:
+    				xaxis = np.array([float(x) for x in xaxisFind.groups()])
+    			yaxisFind = re.search('y-axis\s+(.\d+\.\d+)\s+(.\d+\.\d+)\s+(.\d+\.\d+)\s+(.\d+\.\d+)\s+(.\d+\.\d+)\s+(.\d+\.\d+)',line)
+    			if yaxisFind:
+    				yaxis = np.array([float(x) for x in yaxisFind.groups()])
+    			zaxisFind = re.search('z-axis\s+(.\d+\.\d+)\s+(.\d+\.\d+)\s+(.\d+\.\d+)\s+(.\d+\.\d+)\s+(.\d+\.\d+)\s+(.\d+\.\d+)',line)
+    			if zaxisFind:
+    				zaxis = np.array([float(x) for x in zaxisFind.groups()])
+
+    return origin,xaxis,yaxis,zaxis
+
+pi = m.pi
+cos = m.cos
+sin = m.sin
+def rotateScalars(scals,dims, axis = 'Z'):
+    b = np.zeros((dims[2],dims[1],dims[0]))
+    orig = [(dims[0]-1)*0.5,(dims[1]-1)*0.5,(dims[2]-1)*0.5]
+    phi = pi / 2.0
+    rotZ = np.array([[ int(cos(phi)),-int(sin(phi)),0],
+                    [ int(sin(phi)), int(cos(phi)),0],
+                    [               0,               0,1]])
+    rotX = np.array([[               1,               0,0],
+                    [ 0,int(cos(phi)),-int(sin(phi))],
+                    [ 0,int(sin(phi)), int(cos(phi))]])
+    rotY = np.array([[ int(cos(phi)),0,-int(sin(phi))],
+                    [               0,1,               0],
+                    [ int(sin(phi)),0, int(cos(phi))]])
+    if axis == 'Y':
+        choosen = rotY
+    elif axis == 'X':
+        choosen = rotX
+    else:
+        choosen = rotZ
+
+    for i in range(dims[2]):
+        for j in range(dims[1]):
+            for k in range(dims[0]):
+                l, m, p = (i - orig[0], j - orig[1], k - orig[2])
+                h = np.dot(choosen,[l,m,p])
+                u,v,w = (h[0] + orig[0], h[1] + orig[1], h[2] + orig[2])
+                b[u,v,w] = scals[i,j,k]
+    return b
+
+def filterRange(scals, rng, dims = [10,10,10]):
+    filtered = np.zeros((rng[1],rng[2],rng[3]))
+    filteredOrigin = rng[0]
+    for i in range(rng[1]):
+        for j in range(rng[2]):
+            for k in range(rng[3]):
+                filtered[i,j,k] = scals[filteredOrigin[0] + i, filteredOrigin[1] + j,
+                        filteredOrigin[2] + k]
+    return filtered
+
+def lengthToDims(length,dims,latparams):
+    factorX = (dims[0] - 1)/latparams[0]
+    factorY = (dims[1] - 1)/latparams[1]
+    factorZ = (dims[2] - 1)/latparams[2]
+    resultX = factorX * length
+    resultY = factorY * length
+    resultZ = factorZ * length
+    return (int(resultX),int(resultY),int(resultZ))
+
+# Responsible for taking Screenshots, Magnification and Filename can be changed here
+def takeShot():
+    global renWin, seed, args
+    win2Img = vtkWindowToImageFilter()
+    win2Img.SetInput(renWin)
+    win2Img.SetMagnification(float(args['multiply']))
+    win2Img.Modified()
+    win2Img.Update()
+    outWriter = vtk.vtkPNGWriter()
+    outWriter.SetInput(win2Img.GetOutput())
+    imgname = args['seedname'] + '_' + now('%H%M%S') + '.png'
+    print 'Took screenshot to .. ' + imgname
+    outWriter.SetFileName(imgname)
+    outWriter.Write()
+    renWin.Render()
+
+# Convert x,y,z to spherical coordinates
+def cart2sph(x,y,z):
+    XsqPlusYsq = x**2 + y**2
+    r = m.sqrt(XsqPlusYsq + z**2)               # r
+    elev = m.atan2(z,m.sqrt(XsqPlusYsq))     # theta
+    az = m.atan2(y,x)                           # phi
+    return r, elev, az
+
+def calcNumberOfUnitCells(cellLower,cellUpper):
+    return (cellUpper[0] - cellLower[0])*(cellUpper[1] - cellLower[1])*(cellUpper[2] - cellLower[2])
+
+# Add a way to change the Isovalue by pressing a key
+def Keypress(obj, event):
+    global isovalue, renWin, args, cam
+    key = obj.GetKeySym()
+    if key == "i":
+        isovalue = isovalue + 0.2
+        contours.SetValue(0,isovalue)
+        #textActor.SetInput("%4.4f" %(isovalue))
+        #tp.SetColor(0,0,1)
+        renWin.Render()
+        print "Isovalue"
+        print "%4.8f" % isovalue
+ 
+    elif key == "o":
+        isovalue = isovalue - 0.2
+        if isovalue <= 0:
+            isovalue = 0.000001
+        #textActor.SetInput("%4.4f" %(isovalue))
+        #tp.SetColor(0,0,1)
+        contours.SetValue(0,isovalue)
+        renWin.Render()
+        print "Isovalue"
+        print "%4.8f" % isovalue
+ 
+    elif key == "a":
+        takeShot()
+    elif key == "l":
+        global isLabeled, Actors
+        if isLabeled == True:
+            for i in Actors:
+                i.merge.RemoveInputConnection(0,i.tpd.GetOutputPort())
+                i.merge.Update()
+                isLabeled = False
+        else:
+            for i in Actors:
+                i.merge.AddInputConnection(i.tpd.GetOutputPort())
+                i.merge.Update()
+                isLabeled = True
+        renWin.Render()
+    elif key == "1":
+        cam.SetPosition(0,0,cam.GetDistance())
+        cam.SetRoll(0.)
+        #camtext.SetInput("%4.2f,%4.2f,%4.2f" % cart2sph(*tuple(cam.GetPosition())))
+        print "Cam Position in cartesian coords"
+        print "%4.2f,%4.2f,%4.2f"% tuple(cam.GetPosition())
+        print "Cam Roll Angle"
+        print "%4.2f"% cam.GetRoll()
+
+        renWin.Render()
+    elif key == "2":
+        cam.SetPosition(0,cam.GetDistance(),0)
+        cam.SetRoll(0.)
+        #camtext.SetInput("%4.2f,%4.2f,%4.2f" % cart2sph(*tuple(cam.GetPosition())))
+        print "Cam Position in cartesian coords"
+        print "%4.2f,%4.2f,%4.2f"% tuple(cam.GetPosition())
+        print "Cam Roll Angle"
+        print "%4.2f"% cam.GetRoll()
+
+        renWin.Render()
+    elif key == "4":
+        cam.SetPosition(cam.GetDistance(),0,0)
+        cam.SetRoll(0.)
+        #camtext.SetInput("%4.2f,%4.2f,%4.2f" % cart2sph(*tuple(cam.GetPosition())))
+        print "Cam Position in cartesian coords"
+        print "%4.2f,%4.2f,%4.2f"% tuple(cam.GetPosition())
+        print "Cam Roll Angle"
+        print "%4.2f"% cam.GetRoll()
+
+        renWin.Render()
+    elif key == "5":
+        a = cam.GetDistance()/np.sqrt(3)
+        cam.SetPosition(-a,-a,-a)
+        cam.SetRoll(0.)
+        #camtext.SetInput("%4.2f,%4.2f,%4.2f" % cart2sph(*tuple(cam.GetPosition())))
+        print "Cam Position in cartesian coords"
+        print "%4.2f,%4.2f,%4.2f"% tuple(cam.GetPosition())
+        print "Cam Roll Angle"
+        print "%4.2f"% cam.GetRoll()
+
+        renWin.Render()
+    elif key == "7":
+        a = cam.GetRoll()
+        cam.SetRoll(a - 10.)
+        print "Cam Position in cartesian coords"
+        print "%4.2f,%4.2f,%4.2f"% tuple(cam.GetPosition())
+        print "Cam Roll Angle"
+        print "%4.2f"% cam.GetRoll()
+
+        renWin.Render()
+    elif key == "6":
+        a = cam.GetRoll()
+        cam.SetRoll(a + 10.)
+        print "Cam Position in cartesian coords"
+        print "%4.2f,%4.2f,%4.2f"% tuple(cam.GetPosition())
+        print "Cam Roll Angle"
+        print "%4.2f"% cam.GetRoll()
+
+        renWin.Render()
+    elif key == "h":
+        cam.Zoom(1.1)
+        print "Cam Position in cartesian coords"
+        print "%4.2f,%4.2f,%4.2f"% tuple(cam.GetPosition())
+        print "Cam Roll Angle"
+        print "%4.2f"% cam.GetRoll()
+        print cam.GetViewAngle()
+        renWin.Render()
+    elif key =="j":
+        cam.Zoom(0.9)
+        print "Cam Position in cartesian coords"
+        print "%4.2f,%4.2f,%4.2f"% tuple(cam.GetPosition())
+        print "Cam Roll Angle"
+        print "%4.2f"% cam.GetRoll()
+        print cam.GetViewAngle()
+        renWin.Render()
+
+
+#TODO: For setting the camera the camera roll angle is needed -> --camera requires 4 arguments!!
+
+def setupImageData(dimensions,origin, latticeparams = [1,1,1], spacings = []):
+    global debug
+    imagedata = vtkImageData()
+    imagedata.SetDimensions(dimensions[0],dimensions[1],dimensions[2])
+    imagedata.SetOrigin(origin[0],origin[1],origin[2])
+    if not spacings:
+        spacings = [latticeparams[0]/(dimensions[0]-1.0),latticeparams[1]/(dimensions[1]-1.0),latticeparams[2]/(dimensions[2]-1.0)]
+    imagedata.SetSpacing(spacings[0],spacings[1],spacings[2])
+    return imagedata
+
+def createAtom(posish):
+    global cam
+    global coords
+    global isLabeled
+    global latparams
+    class atom:
+        pass
+    a = atom()
+    a.lbl = vtkVectorText()
+    a.lbl.SetText(names[posish.index])
+    a.sphere = vtkSphereSource()
+    radius = massNums[posish.index]*aConv[0]*1/50.0*5/189.0
+    a.sphere.SetRadius(radius)
+    a.sphere.SetThetaResolution(44)
+    a.sphere.SetPhiResolution(44)
+    a.sphere
+    a.sphere.Update()
+
+    # Convert Atom index to Color
+    numberOfAtoms = max([float(x.index) for x in coords])
+    hueRange = (1 - 0.6668)/numberOfAtoms
+    colors=colorsys.hsv_to_rgb(float(posish.index)*hueRange,0.9,0.4)
+
+    a.translation = vtkTransform()
+    # This setting determines the relative setting of Label and Sphere
+    a.translation.Translate(-radius,1.2*radius,0.0)
+    a.translation.Scale(0.3,0.3,0.3)
+    a.tpd = vtkTransformPolyDataFilter()
+    a.tpd.SetInputConnection(a.lbl.GetOutputPort())
+    a.tpd.SetTransform(a.translation)
+
+    a.merge = vtkAppendPolyData()
+    if args['nolabels']:
+        a.merge.AddInputConnection(a.tpd.GetOutputPort())
+        isLabeled = True
+    else:
+        isLabeled = False
+    a.merge.AddInputConnection(a.sphere.GetOutputPort())
+    a.lblmap = vtkPolyDataMapper()
+    a.lblmap.SetInputConnection(a.merge.GetOutputPort())
+    a.lblfollower = vtkFollower()
+    a.lblfollower.SetMapper(a.lblmap)
+    a.lblfollower.GetProperty().SetColor(colors[0],colors[1],colors[2])
+    a.lblfollower.GetProperty().SetInterpolationToGouraud()
+    a.lblfollower.GetProperty().SetSpecular(20.)
+    a.lblfollower.GetProperty().SetSpecularPower(40.)
+    a.lblfollower.GetProperty().SetDiffuse(20.)
+    a.lblfollower.SetPosition((posish.xyz[0] -org[0])*aConv[0] - 0.5*latparamsWplotout[0],(posish.xyz[1] - org[1])*aConv[1] - 0.5*latparamsWplotout[1],(posish.xyz[2] - org[2])*aConv[2] - 0.5*latparamsWplotout[2])
+    a.lblfollower.SetCamera(cam)
+
+#vtkActor actor
+#    actor SetMapper mapper
+#    eval [actor GetProperty] SetDiffuseColor 1 1 1
+#    eval [actor GetProperty] SetSpecularColor 1 1 1
+#    eval [actor GetProperty] SetSpecularPower 20
+#    eval [actor GetProperty] SetSpecular 0.4
+#    eval [actor GetProperty] SetDiffuse 0.7
+
+    return a
+
+def createLine(coord1,coord2):
+    global latparams
+    class line:
+        pass
+    a = line()
+    a.line = vtkLineSource()
+    a.line.SetPoint1((coord1[0] -org[0])*aConv[0] - 0.5*latparamsWplotout[0],(coord1[1] - org[1])*aConv[1] - 0.5*latparamsWplotout[1],(coord1[2] - org[2])*aConv[2] - 0.5*latparamsWplotout[2])
+    a.line.SetPoint2((coord2[0] -org[0])*aConv[0] - 0.5*latparamsWplotout[0],(coord2[1] - org[1])*aConv[1] - 0.5*latparamsWplotout[1],(coord2[2] - org[2])*aConv[2] - 0.5*latparamsWplotout[2])
+    a.line.Update()
+    a.mapper = vtkPolyDataMapper()
+    a.mapper.SetInputConnection(a.line.GetOutputPort())
+    a.actor = vtkActor()
+    a.actor.GetProperty().SetColor(0,0,0)
+    
+    #a.actor.GetProperty.SetLineWidth(4)
+    a.actor.SetMapper(a.mapper)
+    
+    return a
+
+    
+def offScreenRender():
+    global ren1
+    renderWindow = vtkRenderWindow()
+    renderWindow.SetOffScreenRendering(1)
+    renderWindow.AddRenderer(ren1)
+    renderWindow.SetAAFrames(9)
+    if hq == True:
+        renderWindow.SetLineSmoothing(1)
+        renderWindow.SetPolygonSmoothing(1)    #renderWindow.Render()
+    windowToImageFilter = vtkWindowToImageFilter()
+    #windowToImageFilter.Update()
+    windowToImageFilter.SetMagnification(float(args['multiply']))
+    windowToImageFilter.SetInput(renderWindow)
+    imgname = args['seedname'] + '_' + now('%H%M%S') + '.png'
+    writer = vtkPNGWriter()
+    writer.SetFileName(imgname)
+    writer.SetInputConnection(windowToImageFilter.GetOutputPort())
+    renderWindow.SetSize(800,600)
+    writer.Write()
+    print 'Took screenshot to .. ' + imgname
+
+
+# Parse the commandline
+parser = argparse.ArgumentParser(description='Take *.struct, *.psiarg and *.psink and plot isosurfaces of the orbital')
+parser.add_argument('scriptname')
+parser.add_argument('seedname')
+parser.add_argument('orbital', nargs='?', default='', help='Specifiy which orbital to plot - looks for seedname_orbital.psink')
+parser.add_argument('-up', action='store_const',const='up',default='' ,help='Look for *.psinkup and *.psiargup')
+parser.add_argument('-dn', action='store_const',const='dn',default='', help='Look for *.psinkdn and *.psiargdn')
+parser.add_argument('-i','--iso', default=0.21, help='Set the isovalue. Default = 0.01', type=float)
+parser.add_argument('-l', '--nolabels', action='store_false', help='Dont label the atoms.')
+#parser.add_argument('--noorbitals', action='store_false', help='Dont plot the isosurfaces, only the atoms, not working correctly at the moment')
+parser.add_argument('--outline', action='store_true', help='Plot the outline of the unit cell')
+#parser.add_argument('-r','--rotatescalars', default='', help='Rotate the scalar data around an axis (X, Y, or Z)', choices='XYZ')
+parser.add_argument('-ptf','--printtofile', action='store_true', help='Dont start the plot, only shows the output and exits')
+parser.add_argument('-c','--celllimits',default='0 0 0 1 1 1' ,nargs=6, help='This option requires 6 integer numbers following it. As many unit cells as specified are plotted')
+parser.add_argument('--camera',default = '',nargs=5,help='This option requires a set of cartesian coordinates and the camera roll angle and puts the camera at this position')
+parser.add_argument('--multiply',default='2.5',help='This requires one float number and determines by what factor the screenshot will be enlarged. For high-resolution screenshots')
+parser.add_argument('-o','--opacity',default='1',help='This determines how transparent the isosurface will be. It requires one float number.',type=float)
+parser.add_argument('-ax','--axes',action='store_true',help='Enables x-y-z coordinate system in red-blue-green')
+parser.add_argument('-hq','--highquality',action='store_true',help='Tries to increase quality when printing to file')
+
+#TODO screenshots von kommandozeile mit kameraphase
+args = vars(parser.parse_args(sys.argv))
+
+#### OPTIONS
+#plotorbitals = args['noorbitals']
+plotoutline = args['outline']
+displayaxes = args['axes']
+hq = args['highquality']
+#rotatescalars = bool(args['rotatescalars'])
+#window = args['nowindow']
+#axis = args['rotatescalars']
+isovalue = args['iso']
+plotcoords = True
+debug = False
+filterVolume = False
+userCamPosition = [float(x) for x in args['camera']]
+onlyScreenshot = args['printtofile'] 
+
+if onlyScreenshot:
+    graphics_factory = vtkGraphicsFactory()
+    graphics_factory.SetOffScreenOnlyMode(1)
+    graphics_factory.SetUseMesaClasses(1)
+    imaging_factory = vtkImagingFactory()
+    imaging_factory.SetUseMesaClasses(1)
+ 
+
+#### FILENAMES
+if args['orbital']:
+    suffix = '_' + args['orbital']
+else:
+    suffix = ''
+psinkname = args['seedname'] + suffix + '.psink' + args['up'] + args['dn']
+psiargname = args['seedname'] + suffix + '.psiarg' + args['up'] + args['dn']
+structnm = args['seedname'] + '.struct'
+wplotoutnm = args['seedname'] + '.wplotout' + args['up'] + args['dn']
+
+## Read information about plotting area from wplotout file
+print 'Reading wplotout'
+## Origin read from wplotout and Coordinate Axes
+org,xUnits,yUnits,zUnits = readWplotout(wplotoutnm)
+
+## Set the right amount of unit cells to plot
+if '0 0 0 1 1 1' not in args['celllimits']:                 # Checks if the default option is set on  commandline
+    limits = [int(x) for x in args['celllimits']]
+    cellLower = limits[:3]
+    cellUpper = limits[3:]
+else:
+    # Read plotting area and try to guess number of UnitCells
+    # Naive approach to determining the number of Unit cells to plot
+    # Probably wont work at the slightest hint of something unexpected
+    cellLower = [int(org[0]),int(org[1]),int(org[2])]
+    cellUpper = [int(np.floor(np.sqrt(xUnits[0]**2 + xUnits[1]**2 + xUnits[2]**2))) + cellLower[0],
+                 int(np.floor(np.sqrt(yUnits[0]**2 + yUnits[1]**2 + yUnits[2]**2))) + cellLower[1],
+                 int(np.floor(np.sqrt(zUnits[0]**2 + zUnits[1]**2 + zUnits[2]**2))) + cellLower[2]]
+    print cellLower, cellUpper
+
+latparamsWplotout = [xUnits[3],yUnits[4],zUnits[5]]
+
+## Read the *.struct file
+print 'Reading struct file'
+coords, massNums, symmops, latparams, names = readStruct(structnm)
+
+atomsOrigin = [x for x in it.imap(lambda x,y,z,v,u: (y + (x - y) / 2. - z)*v - 0.5 * u,cellUpper,cellLower,org,latparams,latparamsWplotout)]
+    #a.lblfollower.SetPosition((posish.xyz[0] -org[0])*aConv[0] - 0.5*latparamsWplotout[0],(posish.xyz[1] - org[1])*aConv[1] - 0.5*latparamsWplotout[1],(posish.xyz[2] - org[2])*aConv[2] - 0.5*latparamsWplotout[2])
+
+print atomsOrigin
+## Read psink file
+psink = open(psinkname,'r')
+psink.readline()
+dims =[]
+latparamsPsink = []
+data = []
+for i in range(3):
+    lin = psink.readline()
+    dims.append(int(lin.split()[0]))
+    latparamsPsink.append(float(lin.split()[1]))
+psink.readline()
+
+data = []
+print 'Loading squared amplitudes from psink'
+for line in psink:
+    data.extend([float(x) for x in line.split()])
+amplitudesArray = np.empty(dims[0]*dims[1]*dims[2])
+amplitudesArray = np.array(data).reshape((dims[0],dims[1],dims[2]), order='C').ravel(order='F')
+psink.close()
+
+## Read psiarg file
+psiarg = open(psiargname,'r')
+del data
+
+print 'Loading phases from psiarg'
+data = []
+for line in psiarg:
+    data.extend([float(x) for x in line.split()])
+phasesArray = np.array(data).reshape(dims[0],dims[1],dims[2], order='C').ravel(order='F')
+psiarg.close()
+del data
+## Calculate distance between to grid points
+spacings = [latparamsWplotout[0]/(dims[0]-1.0),latparamsWplotout[1]/(dims[1]-1.0),latparamsWplotout[2]/(dims[2]-1.0)]
+print 'Changing order of arrays'
+
+print 'Dimensions of 3D Grid'
+print dims
+origin = [-0.5*latparamsWplotout[0], -0.5*latparamsWplotout[1],-0.5*latparamsWplotout[2]]
+# This creates the datastructures that vtk can use to plot the isosurface
+vol = setupImageData(dims,origin,latparamsWplotout, spacings = spacings)
+arg = setupImageData(dims,origin,latparamsWplotout, spacings = spacings)
+
+# Take the values read from *.psink and populate a vtk Array with them
+print 'Populating vtk-Arrays with data from psink and psiargfiles'
+scalars = vtkDoubleArray()
+k = 0
+for i in amplitudesArray:
+    scalars.InsertValue(k,i)
+    k += 1
+# Set Scalar Components of ImageData with the scalars Array
+vol.GetPointData().SetScalars(scalars)
+# Do the Same for *.psiarg
+phases = vtkDoubleArray()
+phases.SetName("color")
+k = 0
+for i in phasesArray:
+    phases.InsertValue(k, abs(i))
+    k += 1
+arg.GetPointData().SetScalars(phases)
+print arg.GetScalarRange()
+
+
+vol.GetPointData().AddArray(phases)
+del amplitudesArray, phasesArray
+aConv = latparams
+print 'Unit cell parameters'
+print aConv
+print 'Extension of total plotting area'
+print latparamsWplotout
+
+# Create the coordinates of the atoms in the amount of unit cells specified
+print 'Calculating coordinates of atoms and connecting lines'
+coords.extend(createUnitCellCoords(coords[:],symmops,aConv,doSym=False,cellAmount=cellUpper,negCellAmount=cellLower))
+coords = removeUnwantedCoords(coords[:],cellUpper,cellLower)
+# Create boxes around each individual unit cell
+boxes = [[[0,0,0],[1,0,0]],[[0,0,0],[0,1,0]],[[0,0,0],[0,0,1]],[[1,0,0],[1,1,0]],[[1,0,0],[1,1,0]],[[1,0,0],[1,0,1]],[[1,1,1],[1,1,0]],[[1,1,1],[0,1,1]],[[1,1,1],[1,0,1]],[[1,1,0],[0,1,0]],[[0,1,1],[0,1,0]],[[1,0,1],[0,0,1]]]
+boxes.extend(createLineCoords(boxes[:],cellUpper,cellLower))
+boxes = removeUnwantedCoordPairs(boxes[:],cellUpper,cellLower)
+
+
+## in this block SetHueRange defines which range of colors is used for the phases of the wavefunctions
+lut = vtkLookupTable()
+lut.SetHueRange(0.666667, 0.0)
+# Possible 'black-white' to full color fade
+lut.SetSaturationRange(1.0,1.0)
+# Possible light to dark fade
+lut.SetValueRange(1.0,1.0)
+# Possible Transparency
+lut.SetAlphaRange(1.0, 1.0)
+lut.Build()
+
+
+
+
+# Create Iso-Surfaces Polydata with vtkContourFilter
+contours = vtkContourFilter()
+contours.SetInput(vol)
+contours.SetValue(0,isovalue)
+smoother = vtk.vtkSmoothPolyDataFilter()
+smoother.SetInputConnection(contours.GetOutputPort())
+smoother.SetNumberOfIterations(55)
+
+normals = vtk.vtkPolyDataNormals()
+normals.SetInputConnection(smoother.GetOutputPort())
+normals.FlipNormalsOn()
+
+
+contMapper = vtkPolyDataMapper()
+contMapper.SetInput(normals.GetOutput())
+contMapper.SetScalarRange(arg.GetScalarRange())
+if (arg.GetScalarRange())[0] < 10e-3:
+    contMapper.SetScalarRange(0,arg.GetScalarRange()[1])
+contMapper.SetScalarModeToUsePointFieldData()
+contMapper.SelectColorArray("color")
+contMapper.SetLookupTable(lut)
+# Add an Actor for the Isosurface
+contActor = vtkActor()
+contActor.SetMapper(contMapper)
+contActor.GetProperty().SetOpacity(args['opacity'])
+contActor.GetProperty().SetDiffuseColor(0.3,0.3,0.3)
+contActor.GetProperty().SetSpecularColor(0.5,0.5,0.5)
+contActor.GetProperty().SetAmbientColor(0.3,0.3,0.3)
+contActor.GetProperty().SetSpecular(1)
+contActor.GetProperty().SetSpecularPower(48.)
+print contActor.GetProperty().GetSpecularPower()
+contActor.GetProperty().SetDiffuse(1.)
+
+
+
+# Add a scalar phasesArray
+# TODO: Display 1 - -1 instead of -pi to pi or so
+scalarBar = vtkScalarBarActor()
+scalarBar.SetLookupTable(contMapper.GetLookupTable())
+#scalarBar.SetNumberOfLabels(0)
+scalarBar.SetTitle("Phase (Radians)")
+scalarBar.GetLabelTextProperty().SetColor(0,0,1)
+scalarBar.GetTitleTextProperty().SetColor(0,0,1)
+scalarBar.SetWidth(.12)
+scalarBar.SetHeight(.95)
+spc = scalarBar.GetPositionCoordinate()
+spc.SetCoordinateSystemToNormalizedViewport()
+spc.SetValue(0.05,0.05)
+
+
+## Display the Isovalue
+#textActor = vtkTextActor()
+#tp = vtkTextProperty()
+#tp.BoldOn()
+#tp.SetColor(1.0,0.2,0.3)
+#tp.SetFontFamilyToArial()
+#tp.SetFontSize(20)
+#textActor.SetTextProperty(tp)
+#textActor.SetInput("%4.6f" %(isovalue))
+#tpc = textActor.GetPositionCoordinate()
+#tpc.SetCoordinateSystemToNormalizedViewport()
+#tpc.SetValue(0.75,0.9)
+
+
+
+
+# Section for Outline
+if plotoutline == True:
+    outline = vtkOutlineFilter()
+    outline.SetInput(vol)
+
+    outlineMapper = vtkPolyDataMapper()
+    outlineMapper.SetInput(outline.GetOutput())
+
+    outlineActor = vtkActor()
+    outlineActor.SetMapper(outlineMapper)
+    outlineActor.GetProperty().SetColor(0,0,0)
+
+if displayaxes == True:
+    axesTransform = vtkTransform()
+    axesTransform.Translate([x for x in it.imap(lambda x,y,z,v,u: (y - z)*v - 0.5 * u,cellUpper,cellLower,org,latparams,latparamsWplotout)])
+    tp = vtkTextProperty()
+    #tp.BoldOn()
+    tp.SetColor(0,0,0)
+    tp.SetFontFamilyToArial()
+    tp.SetFontSize(10)
+    
+    axes = vtkAxesActor()
+    axes.SetUserTransform(axesTransform)
+    axes.AxisLabelsOff()
+    axes.SetTotalLength(latparamsWplotout[0]*1/4.,latparamsWplotout[0]*1/4.,latparamsWplotout[0]*1/4.)
+    axes.GetXAxisCaptionActor2D().SetCaptionTextProperty(tp)
+    axes.GetYAxisCaptionActor2D().SetCaptionTextProperty(tp)
+    axes.GetZAxisCaptionActor2D().SetCaptionTextProperty(tp)  
+
+# Add the Renderer and The Renderer Window
+ren1 = vtkRenderer()
+ren1.SetBackground(1,1,1)
+ren1.AddActor(contActor) # The actual isosurface
+ren1.AddActor(scalarBar) # The scalar phasesArray describing the phases
+if plotoutline:
+    ren1.AddActor(outlineActor)
+if displayaxes:
+    ren1.AddActor(axes)
+#ren1.AddActor(textActor)
+
+
+##### CAMERA SECTION
+cam = vtkCamera()
+cam.SetPosition(latparamsWplotout[0]*2,latparamsWplotout[1]*2,latparams[2]*2)
+cam.SetRoll(-90.)
+cam.SetFocalPoint(atomsOrigin)
+ren1.SetActiveCamera(cam)
+
+lights = vtkLightKit()
+lights.AddLightsToRenderer(ren1)
+print lights.GetKeyLightElevation()
+print lights.GetFillLightElevation()
+#lights.SetKeyLightElevation(90)
+#lights.SetKeyLightAzimuth(0)
+#lights.SetFillLightElevation(45)
+#lights.SetFillLightAzimuth(-20)
+
+
+#renWin.Render()
+#renWin.Render()
+#camtext = vtkTextActor()
+
+def releaseCall(obj, ev):
+    global cam
+    #global camtext
+    #camtext.SetInput("%4.2f,%4.2f,%4.2f" % cart2sph(*tuple(cam.GetPosition())))
+    #cam.SetFocalPoint(0,0,0)
+    print "Cam Position in cartesian coords"
+    print "%4.2f,%4.2f,%4.2f"% tuple(cam.GetPosition())
+    print "Cam Roll Angle"
+    print "%4.2f"% cam.GetRoll()
+   
+
+#camtext.GetTextProperty().SetColor(1,0,0)
+#camtext.SetInput("%4.2f,%4.2f,%4.2f" % cart2sph(*tuple(cam.GetPosition())))
+#camtextc = camtext.GetPositionCoordinate()
+#camtextc.SetCoordinateSystemToNormalizedViewport()
+#camtextc.SetValue(0.75,0.15)
+#ren1.AddActor(camtext)
+###### CAMERA SECTION
+
+if userCamPosition:
+    cam.SetPosition(*tuple(userCamPosition[:3]))
+    cam.SetRoll(userCamPosition[3])
+    cam.SetViewAngle(userCamPosition[4])
+    cam.UpdateViewport(ren1)
+    #ren1.Render()
+    #renWin.Render()
+
+# Add spheres and Text for Atoms
+Actors = []
+actorsBoxes = []
+
+
+# Call createAtom fro all coordinates
+if plotcoords == True:
+    for i in coords:
+        Actors.append(createAtom(i))
+        ren1.AddActor(Actors[-1].lblfollower)
+    for i in boxes:
+            actorsBoxes.append(createLine(i[0],i[1]))
+            ren1.AddActor(actorsBoxes[-1].actor)
+
+
+
+if onlyScreenshot == True:
+    offScreenRender()
+    exit()
+
+renWin = vtkRenderWindow()
+renWin.AddRenderer(ren1)
+renWin.SetAAFrames(6)
+print renWin.GetPointSmoothing()
+print renWin.GetLineSmoothing()
+print renWin.GetPolygonSmoothing()
+#renWin.SetLineSmoothing(1)
+#renWin.SetPolygonSmoothing(1)
+renWin.SetSize(800,600)
+# Add the window interactor
+iren = vtkRenderWindowInteractor()
+iren.SetRenderWindow(renWin)
+iren.AddObserver("KeyPressEvent", Keypress)
+iren.AddObserver("EndInteractionEvent",releaseCall)
+iren.SetInteractorStyle(vtkInteractorStyleTrackballCamera())
+
+# Start the Window
+print 'Starting window'
+iren.Initialize()
+renWin.Render()
+iren.Start()
