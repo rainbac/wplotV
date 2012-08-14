@@ -95,9 +95,11 @@ def createUnitCellCoords(coords,symmops,latparams, doSym = True, doTrans = True,
                 newCoords.append(Coords(newCoord[0],newCoord[1],newCoord[2],i.index))
     if doTrans == True:
         lowerIndex = negCellAmount
-        upperIndex = [x + 1 for x in cellAmount]
+        upperIndex = [x + 1. for x in cellAmount]
+        lowerTranslationLimit = [int(k) for k in it.imap(np.floor,lowerIndex)]
+        upperTranslationLimit = [int(k) for k in it.imap(np.ceil,upperIndex)]
         for i in coords:
-            for l in it.product(*[k for k in it.imap(range,lowerIndex,upperIndex)]):
+            for l in it.product(*[k for k in it.imap(range,lowerTranslationLimit,upperTranslationLimit)]):
                 vec = np.array([x for x in it.imap(float,l)])
                 newCoord = np.array(i.xyz) + vec
                 if not elementOf(newCoord,coords) and not elementOf(newCoord,newCoords)  \
@@ -110,15 +112,31 @@ def uniquify(seq):
     seen_add = seen.add
     return [ x for x in seq if x not in seen and not seen_add(x)]
 
+#def createLineCoords(coordPairs,cellAmount,negCellAmount):
+#    newCoordPairs = []
+#    lowerTranslationLimit = [int(k) for k in it.imap(np.floor,negCellAmount)]
+#    upperTranslationLimit = [int(k) for k in it.imap(np.ceil,cellAmount)]
+#    for i in coordPairs:
+#        for l in range(lowerTranslationLimit[0],upperTranslationLimit[0] + 1):
+#            for k in range(lowerTranslationLimit[1],upperTranslationLimit[1] + 1):
+#                 for m in range(lowerTranslationLimit[2],upperTranslationLimit[2] + 1):
+#                     vec = np.array([float(l),float(k),float(m)])
+#                     newCoordPair = [i[0] + vec, i[1] + vec]
+#                     if isWithinLimits(cellAmount,negCellAmount,newCoordPair[0]) and isWithinLimits(cellAmount,negCellAmount,newCoordPair[1]):
+#                         newCoordPairs.append(newCoordPair)
+#    return newCoordPairs
+
 def createLineCoords(coordPairs,cellAmount,negCellAmount):
     newCoordPairs = []
+    lowerTranslationLimit = [int(k) for k in it.imap(np.floor,negCellAmount)]
+    upperTranslationLimit = [int(k) for k in it.imap(np.ceil,cellAmount)]
     for i in coordPairs:
-        for l in range(negCellAmount[0],cellAmount[0] + 1):
-            for k in range(negCellAmount[1],cellAmount[1] + 1):
-                 for m in range(negCellAmount[2],cellAmount[2] + 1):
+        for l in range(lowerTranslationLimit[0],upperTranslationLimit[0] + 1):
+            for k in range(lowerTranslationLimit[1],upperTranslationLimit[1] + 1):
+                 for m in range(lowerTranslationLimit[2],upperTranslationLimit[2] + 1):
                      vec = np.array([float(l),float(k),float(m)])
                      newCoordPair = [i[0] + vec, i[1] + vec]
-                     if isWithinLimits(cellAmount,negCellAmount,newCoordPair[0]) and isWithinLimits(cellAmount,negCellAmount,newCoordPair[1]):
+                     if isWithinLimits(upperTranslationLimit,lowerTranslationLimit,newCoordPair[0]) and isWithinLimits(upperTranslationLimit,lowerTranslationLimit,newCoordPair[1]):
                          newCoordPairs.append(newCoordPair)
     return newCoordPairs
 
@@ -580,7 +598,7 @@ org,xUnits,yUnits,zUnits = readWplotout(wplotoutnm)
 
 ## Set the right amount of unit cells to plot
 if '0 0 0 1 1 1' not in args['celllimits']:                 # Checks if the default option is set on  commandline
-    limits = [int(x) for x in args['celllimits']]
+    limits = [float(x) for x in args['celllimits']]
     cellLower = limits[:3]
     cellUpper = limits[3:]
 else:
@@ -679,8 +697,12 @@ coords.extend(createUnitCellCoords(coords[:],symmops,aConv,doSym=False,cellAmoun
 coords = removeUnwantedCoords(coords[:],cellUpper,cellLower)
 # Create boxes around each individual unit cell
 boxes = [[[0,0,0],[1,0,0]],[[0,0,0],[0,1,0]],[[0,0,0],[0,0,1]],[[1,0,0],[1,1,0]],[[1,0,0],[1,1,0]],[[1,0,0],[1,0,1]],[[1,1,1],[1,1,0]],[[1,1,1],[0,1,1]],[[1,1,1],[1,0,1]],[[1,1,0],[0,1,0]],[[0,1,1],[0,1,0]],[[1,0,1],[0,0,1]]]
-boxes.extend(createLineCoords(boxes[:],cellUpper,cellLower))
-boxes = removeUnwantedCoordPairs(boxes[:],cellUpper,cellLower)
+
+lowerTranslationLimit = [int(k) for k in it.imap(np.floor,cellLower)]
+upperTranslationLimit = [int(k) for k in it.imap(np.ceil,cellUpper)]
+
+boxes.extend(createLineCoords(boxes[:],upperTranslationLimit ,lowerTranslationLimit))
+boxes = removeUnwantedCoordPairs(boxes[:],upperTranslationLimit ,lowerTranslationLimit)
 
 
 ## in this block SetHueRange defines which range of colors is used for the phases of the wavefunctions
