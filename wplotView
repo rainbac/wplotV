@@ -81,6 +81,7 @@ def elementOf(newVec,oldVecSet):
 
 def createUnitCellCoords(coords,symmops,latparams, doSym = True, doTrans = True,
                          cellAmount = [2,2,2], negCellAmount = [-1,-1,-1] ):
+    global count
     newCoords = []
     lp = latparams
     if doSym == True:
@@ -141,22 +142,39 @@ def createLineCoords(coordPairs,cellAmount,negCellAmount):
     return newCoordPairs
 
 def removeUnwantedCoords(coords, cellAmount, negCellAmount):
+    global count
     newCoords=[]
     lowerIndex = negCellAmount
     upperIndex = [cellAmount[0] +1, cellAmount[1] + 1, cellAmount[2] +1]
+    
+
     for i in coords:
         if isWithinLimits(cellAmount,negCellAmount,i.xyz):
-            newCoords.append(Coords(i.xyz[0],i.xyz[1],i.xyz[2],i.index))
-    newCoords = uniquify(newCoords)
+            isNotInNewcoords = True
+
+            for j in newCoords:
+                if tuple(i.xyz) == tuple(j.xyz):
+                    isNotInNewcoords = False
+
+            if isNotInNewcoords:
+                newCoords.append(Coords(i.xyz[0],i.xyz[1],i.xyz[2],i.index))
+    print 'Number of Atoms ', len(newCoords)
     return newCoords
 
 ## OH THE REDUNDANCY
 def removeUnwantedCoordPairs(coordPairs, cellAmount, negCellAmount):
     newCoordPairs = []
     for i in coordPairs:
-        if isWithinLimits(cellAmount,negCellAmount,i[0]) and isWithinLimits(cellAmount,negCellAmount,i[1]):
+        isUnique = True
+        for j in newCoordPairs:
+            if ((tuple(i[0]) == tuple(j[0])) and (tuple(i[1]) == tuple(j[1]))) or \
+                ((tuple(i[0]) == tuple(j[1])) and (tuple(i[1]) == tuple(j[0]))):
+                    isUnique = False
+
+        if isWithinLimits(cellAmount,negCellAmount,i[0]) and isWithinLimits(cellAmount,negCellAmount,i[1]) and isUnique:
             newCoordPairs.append(i)
     #newCoordPairs = uniquify(newCoordPairs) -- Doesnt work yet
+    print 'Number of Lines: ', len(newCoordPairs)
     return newCoordPairs
 
 def readWplotout(filename):
@@ -433,63 +451,89 @@ def setupImageData(dimensions,origin, latticeparams = [1,1,1], spacings = []):
     imagedata.SetSpacing(spacings[0],spacings[1],spacings[2])
     return imagedata
 
-def createAtom(posish):
+def createAtom(posish,atomColors = []):
     global cam
     global coords
     global isLabeled
     global latparams
+    positionOfAtom = (posish.xyz[0] -org[0])*aConv[0] - 0.5*latparamsWplotout[0],(posish.xyz[1] - org[1])*aConv[1] - 0.5*latparamsWplotout[1],(posish.xyz[2] - org[2])*aConv[2] - 0.5*latparamsWplotout[2]
+    if args['highquality']:
+        sphereResolution = 64
+    else:
+        sphereResolution = 12
     class atom:
         pass
     a = atom()
     a.lbl = vtkVectorText()
     a.lbl.SetText(names[posish.index])
+
     a.sphere = vtkSphereSource()
-    radius = massNums[posish.index]*aConv[0]*1/50.0*5/189.0
+    radius = massNums[posish.index]*aConv[0]*1/50.0*12/189.0
     a.sphere.SetRadius(radius)
-    a.sphere.SetThetaResolution(44)
-    a.sphere.SetPhiResolution(44)
-    a.sphere
+    a.sphere.SetThetaResolution(sphereResolution)
+    a.sphere.SetPhiResolution(sphereResolution)
     a.sphere.Update()
+
+    a.smallsphere = vtkSphereSource()
+    radius2 = 0.1*radius
+    a.smallsphere.SetRadius(radius2)
+    a.smallsphere.SetThetaResolution(4)
+    a.smallsphere.SetPhiResolution(4)
+    a.smallsphere.Update()
+
+    transDist = 50*aConv[0]*1/50.0*12/189.0
 
     # Convert Atom index to Color
     numberOfAtoms = max([float(x.index) for x in coords])
-    hueRange = (1 - 0.6668)/numberOfAtoms
-    colors=colorsys.hsv_to_rgb(float(posish.index)*hueRange,0.9,0.4)
+    hueRange = (1 - 0.5)/numberOfAtoms
+    colors=colorsys.hsv_to_rgb(float(posish.index)*hueRange,0.9,0.7)
+    print colors
+    if atomColors:
+        colors = atomColors[int(posish.index)]
 
     a.translation = vtkTransform()
     # This setting determines the relative setting of Label and Sphere
-    a.translation.Translate(-radius,1.2*radius,0.0)
-    a.translation.Scale(0.3,0.3,0.3)
+    #a.translation.Translate(-radius,1.2*radius,0.0)
+    a.translation.Translate(-0.5*transDist,-0.2*transDist,1.2*radius)
+    a.translation.Scale(0.4,0.4,0.4)
     a.tpd = vtkTransformPolyDataFilter()
     a.tpd.SetInputConnection(a.lbl.GetOutputPort())
     a.tpd.SetTransform(a.translation)
 
     a.merge = vtkAppendPolyData()
+
+    a.tpddata = a.tpd.GetOutput()
     if args['nolabels']:
-        a.merge.AddInputConnection(a.tpd.GetOutputPort())
+        a.merge.AddInputConnection(a.tpddata.GetProducerPort())
         isLabeled = True
     else:
         isLabeled = False
-    a.merge.AddInputConnection(a.sphere.GetOutputPort())
+
+    a.spheredata = a.sphere.GetOutput()
+    a.smallspheredata = a.smallsphere.GetOutput()
+
+    a.merge.AddInput(a.smallspheredata)
+    a.mergedata =  a.merge.GetOutput()
     a.lblmap = vtkPolyDataMapper()
     a.lblmap.SetInputConnection(a.merge.GetOutputPort())
     a.lblfollower = vtkFollower()
     a.lblfollower.SetMapper(a.lblmap)
-    a.lblfollower.GetProperty().SetColor(colors[0],colors[1],colors[2])
-    a.lblfollower.GetProperty().SetInterpolationToGouraud()
-    a.lblfollower.GetProperty().SetSpecular(20.)
-    a.lblfollower.GetProperty().SetSpecularPower(40.)
-    a.lblfollower.GetProperty().SetDiffuse(20.)
-    a.lblfollower.SetPosition((posish.xyz[0] -org[0])*aConv[0] - 0.5*latparamsWplotout[0],(posish.xyz[1] - org[1])*aConv[1] - 0.5*latparamsWplotout[1],(posish.xyz[2] - org[2])*aConv[2] - 0.5*latparamsWplotout[2])
+    a.lblfollower.GetProperty().SetColor(255,255,255)
+    a.lblfollower.SetPosition(positionOfAtom)
     a.lblfollower.SetCamera(cam)
+    print 'index ', posish.index
+    a.spheremapper = vtkPolyDataMapper()
+    a.spheremapper.SetInputConnection(a.sphere.GetOutputPort())
+    a.sphereactor = vtkActor()
+    a.sphereactor.SetMapper(a.spheremapper)
+    a.sphereactor.GetProperty().SetColor(colors[0],colors[1],colors[2])
+    a.sphereactor.SetPosition(positionOfAtom)
+    a.sphereactor.GetProperty().SetInterpolationToGouraud()
+    a.sphereactor.GetProperty().SetSpecular(0.6)
+    a.sphereactor.GetProperty().SetDiffuse(0.7)
+    a.sphereactor.GetProperty().SetAmbient(0.25)
+    a.sphereactor.GetProperty().SetSpecularPower(24.)
 
-#vtkActor actor
-#    actor SetMapper mapper
-#    eval [actor GetProperty] SetDiffuseColor 1 1 1
-#    eval [actor GetProperty] SetSpecularColor 1 1 1
-#    eval [actor GetProperty] SetSpecularPower 20
-#    eval [actor GetProperty] SetSpecular 0.4
-#    eval [actor GetProperty] SetDiffuse 0.7
 
     return a
 
@@ -507,7 +551,8 @@ def createLine(coord1,coord2):
     a.actor = vtkActor()
     a.actor.GetProperty().SetColor(0,0,0)
     
-    #a.actor.GetProperty.SetLineWidth(4)
+    a.actor.GetProperty().SetLineWidth(2)
+    a.actor.GetProperty().SetColor(0.6,0.6,0.6)
     a.actor.SetMapper(a.mapper)
     
     return a
@@ -518,7 +563,7 @@ def offScreenRender():
     renderWindow = vtkRenderWindow()
     renderWindow.SetOffScreenRendering(1)
     renderWindow.AddRenderer(ren1)
-    renderWindow.SetAAFrames(9)
+    renderWindow.SetAAFrames(4)
     if hq == True:
         renderWindow.SetLineSmoothing(1)
         renderWindow.SetPolygonSmoothing(1)    #renderWindow.Render()
@@ -533,6 +578,10 @@ def offScreenRender():
     renderWindow.SetSize(800,600)
     writer.Write()
     print 'Took screenshot to .. ' + imgname
+
+
+##########     AtomColors
+atomColors = [(0,0,0),(0.7,0,0),(0.35,0.35,0.7),(0.,0.7,0.),(0.7,0,0),(0.,0.7,0.),(0.35,0.35,0.7)]
 
 
 # Parse the commandline
@@ -557,7 +606,6 @@ parser.add_argument('-hq','--highquality',action='store_true',help='Tries to inc
 
 #TODO screenshots von kommandozeile mit kameraphase
 args = vars(parser.parse_args(sys.argv))
-
 #### OPTIONS
 #plotorbitals = args['noorbitals']
 plotoutline = args['outline']
@@ -723,12 +771,15 @@ lut.Build()
 contours = vtkContourFilter()
 contours.SetInput(vol)
 contours.SetValue(0,isovalue)
-smoother = vtk.vtkSmoothPolyDataFilter()
-smoother.SetInputConnection(contours.GetOutputPort())
-smoother.SetNumberOfIterations(55)
 
 normals = vtk.vtkPolyDataNormals()
-normals.SetInputConnection(smoother.GetOutputPort())
+if args['highquality']:
+    smoother = vtk.vtkSmoothPolyDataFilter()
+    smoother.SetInputConnection(contours.GetOutputPort())
+    smoother.SetNumberOfIterations(12)
+    normals.SetInputConnection(smoother.GetOutputPort())
+else:
+    normals.SetInputConnection(contours.GetOutputPort())
 normals.FlipNormalsOn()
 
 
@@ -747,10 +798,10 @@ contActor.GetProperty().SetOpacity(args['opacity'])
 contActor.GetProperty().SetDiffuseColor(0.3,0.3,0.3)
 contActor.GetProperty().SetSpecularColor(0.5,0.5,0.5)
 contActor.GetProperty().SetAmbientColor(0.3,0.3,0.3)
-contActor.GetProperty().SetSpecular(1)
-contActor.GetProperty().SetSpecularPower(48.)
-print contActor.GetProperty().GetSpecularPower()
-contActor.GetProperty().SetDiffuse(1.)
+contActor.GetProperty().SetSpecular(0.7)
+contActor.GetProperty().SetSpecularPower(24.)
+contActor.GetProperty().SetAmbient(0.1)
+contActor.GetProperty().SetDiffuse(0.25)
 
 
 
@@ -828,7 +879,7 @@ if displayaxes:
 
 ##### CAMERA SECTION
 cam = vtkCamera()
-cam.SetPosition(latparamsWplotout[0]*2,latparamsWplotout[1]*2,latparams[2]*2)
+cam.SetPosition(latparamsWplotout[0]*1.3,latparamsWplotout[1]*1.3,latparams[2]*1.3)
 cam.SetRoll(-90.)
 cam.SetFocalPoint(atomsOrigin)
 ren1.SetActiveCamera(cam)
@@ -880,13 +931,19 @@ actorsBoxes = []
 
 
 # Call createAtom fro all coordinates
+k = 0
 if plotcoords == True:
     for i in coords:
-        Actors.append(createAtom(i))
+        Actors.append(createAtom(i,atomColors))
         ren1.AddActor(Actors[-1].lblfollower)
+        ren1.AddActor(Actors[-1].sphereactor)
+        k = k + 1
+        print k
     for i in boxes:
             actorsBoxes.append(createLine(i[0],i[1]))
             ren1.AddActor(actorsBoxes[-1].actor)
+            k = k + 1
+            print k
 
 
 
@@ -896,12 +953,14 @@ if onlyScreenshot == True:
 
 renWin = vtkRenderWindow()
 renWin.AddRenderer(ren1)
-renWin.SetAAFrames(6)
-print renWin.GetPointSmoothing()
-print renWin.GetLineSmoothing()
-print renWin.GetPolygonSmoothing()
-#renWin.SetLineSmoothing(1)
-#renWin.SetPolygonSmoothing(1)
+if args['highquality']:
+    renWin.SetAAFrames(6)
+#print 'Smoothing is on or what?'
+#print renWin.GetPointSmoothing()
+#print renWin.GetLineSmoothing()
+#print renWin.GetPolygonSmoothing()
+##renWin.SetLineSmoothing(1)
+##renWin.SetPolygonSmoothing(1)
 renWin.SetSize(800,600)
 # Add the window interactor
 iren = vtkRenderWindowInteractor()
